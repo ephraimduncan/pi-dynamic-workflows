@@ -23,11 +23,18 @@ const workflowToolSchema = Type.Object({
   args: Type.Optional(
     Type.Any({ description: "Optional JSON value exposed to the workflow script as global `args`." }),
   ),
+  tokenBudget: Type.Optional(
+    Type.Number({
+      description:
+        "Optional token ceiling for all subagents together. When the subagents use this many tokens, new agent() calls fail. Use it when the user gives a token or cost limit.",
+    }),
+  ),
 });
 
 export type WorkflowToolInput = {
   script: string;
   args?: unknown;
+  tokenBudget?: number;
 };
 
 const workflowDisplayOptions = {
@@ -41,6 +48,8 @@ const workflowDisplayOptions = {
 export interface WorkflowToolOptions {
   cwd?: string;
   concurrency?: number;
+  /** Most agent() calls one workflow run can make. Default: 200. */
+  maxAgents?: number;
 }
 
 export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefinition<typeof workflowToolSchema, any> {
@@ -100,6 +109,8 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
           args: params.args,
           signal,
           concurrency: options.concurrency,
+          maxAgents: options.maxAgents,
+          tokenBudget: params.tokenBudget,
           session: {
             model: ctx.model,
             thinkingLevel: ctx.thinkingLevel,

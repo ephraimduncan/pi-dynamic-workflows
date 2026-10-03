@@ -1,4 +1,5 @@
 import vm from "node:vm";
+import type { SessionStats } from "@earendil-works/pi-coding-agent";
 import type { Node } from "acorn";
 import { parse } from "acorn";
 import type { TSchema } from "typebox";
@@ -21,7 +22,10 @@ export interface WorkflowRunOptions extends WorkflowAgentOptions {
   args?: unknown;
   agent?: Pick<WorkflowAgent, "run">;
   concurrency?: number;
+  /** Token ceiling for all subagent sessions. When spent, agent() calls fail. */
   tokenBudget?: number | null;
+  /** Most agent() calls one run can make. Stops a script that loops without end. Default: 200. */
+  maxAgents?: number;
   signal?: AbortSignal;
   onLog?: (message: string) => void;
   onPhase?: (title: string) => void;
@@ -57,6 +61,8 @@ interface RuntimeState {
 }
 
 type AnyNode = Node & { [key: string]: any; start: number; end: number };
+
+const DEFAULT_MAX_AGENTS = 200;
 
 const NONDETERMINISM_ERROR =
   "Workflow scripts must be deterministic: Date.now()/Math.random()/new Date() are unavailable";
@@ -109,6 +115,8 @@ export async function runWorkflow<T = unknown>(
   );
   const limiter = createLimiter(concurrency);
   const pendingAgentRuns = new Set<Promise<unknown>>();
+  const maxAgents = options.maxAgents ?? DEFAULT_MAX_AGENTS;
+  let requestedAgents = 0;
 
   const log = (message: string) => {
     const text = String(message);
@@ -133,14 +141,21 @@ export async function runWorkflow<T = unknown>(
     if (options.signal?.aborted) throw new Error("workflow aborted");
   };
 
+  const throwIfBudgetSpent = () => {
+    if (budget.total !== null && budget.remaining() <= 0) throw new Error("workflow token budget exhausted");
+  };
+
   const agent = async (prompt: unknown, agentOptions: unknown = {}) => {
     throwIfAborted();
-    if (budget.total !== null && budget.remaining() <= 0) throw new Error("workflow token budget exhausted");
+    throwIfBudgetSpent();
+    if (++requestedAgents > maxAgents) throw new Error(`workflow agent limit reached: at most ${maxAgents} agents`);
     const taskPrompt = requireString(prompt, "agent prompt");
     const normalizedOptions = normalizeAgentOptions(agentOptions);
     const assignedPhase = normalizedOptions.phase ?? state.currentPhase;
     const requestedLabel = normalizedOptions.label?.trim();
     const run = limiter(async () => {
+      // The budget can run out while this agent waits in the queue.
+      throwIfBudgetSpent();
       state.agentCount++;
       const label = requestedLabel || defaultAgentLabel(assignedPhase, state.agentCount);
       options.onAgentStart?.({ label, phase: assignedPhase, prompt: taskPrompt });
@@ -152,10 +167,12 @@ export async function runWorkflow<T = unknown>(
           signal: options.signal,
           model: normalizedOptions.model,
           onModel: (model: string) => options.onAgentModel?.({ label, phase: assignedPhase, model }),
+          onStats: (stats: SessionStats) => {
+            state.spent += stats.tokens.total;
+          },
           instructions: buildAgentInstructions(assignedPhase, normalizedOptions),
         } as any);
         throwIfAborted();
-        state.spent += estimateTokens(result);
         options.onAgentEnd?.({ label, phase: assignedPhase, result });
         return result;
       } catch (error) {
@@ -496,8 +513,4 @@ function buildAgentInstructions(phase: string | undefined, options: AgentOptions
   if (options.agentType) lines.push(`Act as workflow subagent type: ${options.agentType}`);
   if (options.isolation) lines.push(`Requested isolation: ${options.isolation}`);
   return lines.length ? lines.join("\n") : undefined;
-}
-
-function estimateTokens(value: unknown): number {
-  return Math.ceil(JSON.stringify(value ?? "").length / 4);
 }

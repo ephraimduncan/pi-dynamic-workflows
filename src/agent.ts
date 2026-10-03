@@ -8,6 +8,7 @@ import {
   ModelRuntime,
   resolveModelScopeWithDiagnostics,
   SessionManager,
+  type SessionStats,
   SettingsManager,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
@@ -38,11 +39,16 @@ export interface AgentRunOptions<TSchemaDef extends TSchema | undefined = undefi
   model?: string;
   /** Called with the "provider/id" of the model the subagent runs on. */
   onModel?: (model: string) => void;
+  /** Called with the token usage of the subagent session, also when the run fails. */
+  onStats?: (stats: SessionStats) => void;
 }
 
 export type AgentRunResult<TSchemaDef extends TSchema | undefined> = TSchemaDef extends TSchema
   ? Static<TSchemaDef>
   : string;
+
+/** Extra prompts sent to a structured-output subagent that ends without a structured_output call. */
+const STRUCTURED_OUTPUT_RETRIES = 2;
 
 export class WorkflowAgent {
   private readonly cwd: string;
@@ -100,8 +106,16 @@ export class WorkflowAgent {
       if (options.signal?.aborted) throw new Error("Subagent was aborted");
 
       if (options.schema) {
+        for (let retry = 0; !capture.called && retry < STRUCTURED_OUTPUT_RETRIES; retry++) {
+          await session.prompt(
+            "You ended without a structured_output call. Call structured_output now with your final result. Do not reply with prose.",
+          );
+          if (options.signal?.aborted) throw new Error("Subagent was aborted");
+        }
         if (!capture.called) {
-          throw new Error("Subagent finished without calling structured_output");
+          throw new Error(
+            `Subagent finished without calling structured_output after ${STRUCTURED_OUTPUT_RETRIES + 1} prompts`,
+          );
         }
         return capture.value as AgentRunResult<TSchemaDef>;
       }
@@ -109,6 +123,7 @@ export class WorkflowAgent {
       return this.lastAssistantText(session.messages) as AgentRunResult<TSchemaDef>;
     } finally {
       removeAbortListener?.();
+      options.onStats?.(session.getSessionStats());
       session.dispose();
     }
   }

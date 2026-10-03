@@ -96,6 +96,9 @@ declare global {
   /** Deterministic process shim exposing only cwd(). */
   const process: { cwd(): string };
 
-  /** Simple token-budget estimate for workflow runs. */
+  /**
+   * Token budget of the run. spent() counts the tokens that finished subagent sessions used.
+   * total is null when the workflow call has no tokenBudget.
+   */
   const budget: WorkflowBudget;
 }

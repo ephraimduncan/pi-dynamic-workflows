@@ -109,6 +109,44 @@ await agent('scan', { label: 'scan', model: 'haiku' })
   assert.deepEqual(models, ["anthropic/claude-haiku-4-5"]);
 });
 
+test("runWorkflow stops queued agents when the token budget is spent", async () => {
+  const prompts: string[] = [];
+
+  const result = await runWorkflow(
+    `export const meta = { name: 'budget', description: 'Spend the budget' }
+return await parallel(['a', 'b', 'c'].map((name) => () => agent(name, { label: name })))
+`,
+    {
+      concurrency: 1,
+      tokenBudget: 100,
+      agent: {
+        async run(prompt: string, options: { onStats?: (stats: { tokens: { total: number } }) => void }) {
+          prompts.push(prompt);
+          options.onStats?.({ tokens: { total: 60 } });
+          return prompt;
+        },
+      },
+    },
+  );
+
+  assert.deepEqual(prompts, ["a", "b"]);
+  assert.deepEqual(structuredClone(result.result), ["a", "b", null]);
+  assert.ok(result.logs.some((line) => line.includes("token budget exhausted")));
+});
+
+test("runWorkflow stops a script that starts more agents than maxAgents", async () => {
+  await assert.rejects(
+    () =>
+      runWorkflow(
+        `export const meta = { name: 'loop', description: 'Loop without end' }
+for (let i = 0; i < 3; i++) await agent('scan ' + i)
+`,
+        { agent: fakeAgent, maxAgents: 2 },
+      ),
+    /agent limit reached: at most 2 agents/,
+  );
+});
+
 test("runWorkflow rejects non-string runtime phase titles", async () => {
   await assert.rejects(
     () =>

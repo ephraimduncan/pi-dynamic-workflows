@@ -37,10 +37,10 @@ The model will write a workflow script and call the `workflow` tool. Live progre
 ```text
 ◆ Workflow: inspect_project (3/3 done)
   ✓ Scan 1/1
-    #1 ✓ repo inventory
+    #1 ✓ repo inventory [anthropic/claude-haiku-4-5]
   ✓ Analyze 2/2
-    #2 ✓ source modules
-    #3 ✓ final summary
+    #2 ✓ source modules [anthropic/claude-haiku-4-5]
+    #3 ✓ final summary [anthropic/claude-opus-4-5]
 ```
 
 Press `Esc` to cancel a running workflow. Active subagents are aborted and surfaced as skipped.
@@ -96,7 +96,7 @@ This declares `agent`, `parallel`, `pipeline`, `phase`, `log`, `args`, `cwd`, an
 | `log(message)` | Append a workflow-level log line. |
 | `args` | Optional JSON value passed in via the tool's `args` parameter. |
 | `cwd`, `process.cwd()` | Current working directory for subagents. |
-| `budget` | `{ total, spent(), remaining() }` token budget tracker. |
+| `budget` | `{ total, spent(), remaining() }` token budget tracker. `spent()` counts the tokens that finished subagent sessions used. `total` comes from the `tokenBudget` tool argument. When the budget is spent, new `agent()` calls fail. |
 | `Date` | Deterministic subset only: `Date.parse()` and `Date.UTC()`. |
 
 ### Determinism rules
@@ -109,6 +109,12 @@ Workflow scripts are evaluated inside a Node `vm` sandbox. The following are int
 - spreads, computed keys, template interpolation, function calls inside `meta`
 
 The parser rejects the direct forms up front; the runtime shims close aliasing bypasses. This keeps `meta` parseable, runs reproducible, and the surface area small.
+
+### Limits
+
+A workflow run can make at most 200 `agent()` calls. This limit stops a script that loops without end. To change it, use the `maxAgents` option of `createWorkflowTool()`.
+
+To limit tokens, give the `tokenBudget` argument to the `workflow` tool. Each subagent adds the tokens of its session to `budget.spent()`. When the budget is spent, agents in the queue do not start and new `agent()` calls fail.
 
 ### Structured subagent output
 
@@ -128,7 +134,7 @@ const finding = await agent('Find security-sensitive files.', {
 })
 ```
 
-Under the hood this is a Pi `structured_output` tool with `terminate: true`, so the subagent ends on that call without an extra assistant turn.
+Under the hood this is a Pi `structured_output` tool with `terminate: true`, so the subagent ends on that call without an extra assistant turn. If the subagent ends without a `structured_output` call, the runtime prompts it two more times. If it still does not call the tool, the agent resolves to `null`.
 
 ### Per-agent model selection
 
