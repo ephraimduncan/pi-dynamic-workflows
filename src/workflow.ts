@@ -26,6 +26,7 @@ export interface WorkflowRunOptions extends WorkflowAgentOptions {
   onLog?: (message: string) => void;
   onPhase?: (title: string) => void;
   onAgentStart?: (event: { label: string; phase?: string; prompt: string }) => void;
+  onAgentModel?: (event: { label: string; phase?: string; model: string }) => void;
   onAgentEnd?: (event: { label: string; phase?: string; result: unknown }) => void;
 }
 
@@ -149,6 +150,8 @@ export async function runWorkflow<T = unknown>(
           label,
           schema: normalizedOptions.schema,
           signal: options.signal,
+          model: normalizedOptions.model,
+          onModel: (model: string) => options.onAgentModel?.({ label, phase: assignedPhase, model }),
           instructions: buildAgentInstructions(assignedPhase, normalizedOptions),
         } as any);
         throwIfAborted();
@@ -487,7 +490,6 @@ function buildAgentInstructions(phase: string | undefined, options: AgentOptions
   if (phase) lines.push(`Workflow phase: ${phase}`);
   if (options.agentType) lines.push(`Act as workflow subagent type: ${options.agentType}`);
   if (options.isolation) lines.push(`Requested isolation: ${options.isolation}`);
-  if (options.model) lines.push(`Requested model: ${options.model}`);
   return lines.length ? lines.join("\n") : undefined;
 }
 

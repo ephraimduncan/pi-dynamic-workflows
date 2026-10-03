@@ -1,9 +1,12 @@
+import { join } from "node:path";
 import type { AssistantMessage, TextContent } from "@earendil-works/pi-ai";
 import {
   type CreateAgentSessionOptions,
   createAgentSession,
   createCodingTools,
   getAgentDir,
+  ModelRuntime,
+  resolveModelScopeWithDiagnostics,
   SessionManager,
   SettingsManager,
   type ToolDefinition,
@@ -27,6 +30,14 @@ export interface AgentRunOptions<TSchemaDef extends TSchema | undefined = undefi
   tools?: ToolDefinition[];
   instructions?: string;
   signal?: AbortSignal;
+  /**
+   * Model pattern, resolved like pi's `--models` flag: "haiku", "sonnet:low",
+   * or "anthropic/claude-sonnet-4-5". Only models with configured auth match.
+   * When omitted, the subagent uses the session model.
+   */
+  model?: string;
+  /** Called with the "provider/id" of the model the subagent runs on. */
+  onModel?: (model: string) => void;
 }
 
 export type AgentRunResult<TSchemaDef extends TSchema | undefined> = TSchemaDef extends TSchema
@@ -38,6 +49,7 @@ export class WorkflowAgent {
   private readonly baseTools: ToolDefinition[];
   private readonly sessionOptions: Partial<CreateAgentSessionOptions>;
   private readonly instructions?: string;
+  private modelRuntime?: Promise<ModelRuntime>;
 
   constructor(options: WorkflowAgentOptions = {}) {
     this.cwd = options.cwd ?? process.cwd();
@@ -57,7 +69,9 @@ export class WorkflowAgent {
       customTools.push(createStructuredOutputTool({ schema: options.schema, capture }) as unknown as ToolDefinition);
     }
 
-    const agentDir = getAgentDir();
+    const agentDir = this.sessionOptions.agentDir ?? getAgentDir();
+    const modelRuntime = await this.getModelRuntime(agentDir);
+    const pinned = options.model === undefined ? undefined : await resolveModel(options.model, modelRuntime);
     const { session } = await createAgentSession({
       cwd: this.cwd,
       agentDir,
@@ -65,10 +79,16 @@ export class WorkflowAgent {
       settingsManager: SettingsManager.create(this.cwd, agentDir),
       customTools,
       ...this.sessionOptions,
+      modelRuntime,
+      // Subagents load the same extensions as the parent. Without this, a subagent could start a nested workflow.
+      excludeTools: [...(this.sessionOptions.excludeTools ?? []), "workflow"],
+      ...(pinned?.model ? { model: pinned.model } : {}),
+      ...(pinned?.thinkingLevel ? { thinkingLevel: pinned.thinkingLevel } : {}),
     });
 
     let removeAbortListener: (() => void) | undefined;
     try {
+      if (session.model) options.onModel?.(`${session.model.provider}/${session.model.id}`);
       if (options.signal?.aborted) throw new Error("Subagent was aborted");
       if (options.signal) {
         const onAbort = () => void session.abort();
@@ -91,6 +111,15 @@ export class WorkflowAgent {
       removeAbortListener?.();
       session.dispose();
     }
+  }
+
+  private getModelRuntime(agentDir: string): Promise<ModelRuntime> {
+    if (this.sessionOptions.modelRuntime) return Promise.resolve(this.sessionOptions.modelRuntime);
+    this.modelRuntime ??= ModelRuntime.create({
+      authPath: join(agentDir, "auth.json"),
+      modelsPath: join(agentDir, "models.json"),
+    });
+    return this.modelRuntime;
   }
 
   private buildPrompt(prompt: string, options: AgentRunOptions<any>, structured: boolean): string {
@@ -128,4 +157,12 @@ export class WorkflowAgent {
     }
     return "";
   }
+}
+
+async function resolveModel(pattern: string, modelRuntime: ModelRuntime) {
+  const { scopedModels } = await resolveModelScopeWithDiagnostics([pattern], modelRuntime);
+  if (scopedModels.length === 1) return scopedModels[0];
+  if (scopedModels.length === 0) throw new Error(`no model with configured auth matches "${pattern}"`);
+  const names = scopedModels.map(({ model }) => `${model.provider}/${model.id}`).join(", ");
+  throw new Error(`model "${pattern}" matches more than one model: ${names}`);
 }

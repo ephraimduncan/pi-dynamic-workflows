@@ -11,6 +11,8 @@ export interface WorkflowAgentSnapshot {
   status: WorkflowAgentStatus;
   resultPreview?: string;
   error?: string;
+  /** The "provider/id" the subagent runs on. */
+  model?: string;
 }
 
 export interface WorkflowSnapshot {
@@ -162,11 +164,7 @@ export function renderWorkflowLines(snapshot: WorkflowSnapshot, options: Workflo
     );
 
     const visibleAgents = agents.slice(-maxAgents);
-    for (const agent of visibleAgents) {
-      const order = `#${agent.id}`;
-      const result = showResultPreviews && agent.resultPreview ? ` — ${agent.resultPreview}` : "";
-      lines.push(`    ${order} ${statusIcon(agent.status)} ${shorten(agent.label, 48)}${result}`);
-    }
+    for (const agent of visibleAgents) lines.push(agentLine(agent, showResultPreviews));
     if (agents.length > visibleAgents.length)
       lines.push(`    … ${agents.length - visibleAgents.length} earlier agents`);
   }
@@ -174,10 +172,7 @@ export function renderWorkflowLines(snapshot: WorkflowSnapshot, options: Workflo
   const unphased = snapshot.agents.filter((agent) => !rendered.has(agent));
   if (unphased.length) {
     lines.push("  Unphased");
-    for (const agent of unphased.slice(-maxAgents)) {
-      const result = showResultPreviews && agent.resultPreview ? ` — ${agent.resultPreview}` : "";
-      lines.push(`    #${agent.id} ${statusIcon(agent.status)} ${shorten(agent.label, 48)}${result}`);
-    }
+    for (const agent of unphased.slice(-maxAgents)) lines.push(agentLine(agent, showResultPreviews));
   }
 
   const visibleLogs = snapshot.logs.slice(-maxLogs);
@@ -195,6 +190,12 @@ export function renderWorkflowText(
 ): string {
   const header = completed ? "Workflow completed" : "Workflow running";
   return [header, ...renderWorkflowLines(snapshot, options)].join("\n");
+}
+
+function agentLine(agent: WorkflowAgentSnapshot, showResultPreviews: boolean): string {
+  const model = agent.model ? ` [${agent.model}]` : "";
+  const result = showResultPreviews && agent.resultPreview ? ` — ${agent.resultPreview}` : "";
+  return `    #${agent.id} ${statusIcon(agent.status)} ${shorten(agent.label, 48)}${model}${result}`;
 }
 
 function statusLine(snapshot: WorkflowSnapshot, completed: boolean): string {

@@ -85,6 +85,30 @@ return { scan }
   assert.equal(ended, 1);
 });
 
+test("runWorkflow passes opts.model to the subagent runner", async () => {
+  const calls: Array<{ model?: string; instructions?: string }> = [];
+  const models: string[] = [];
+
+  await runWorkflow(
+    `export const meta = { name: 'model_pin', description: 'Pin a model' }
+await agent('scan', { label: 'scan', model: 'haiku' })
+`,
+    {
+      agent: {
+        async run(_prompt: string, options: { model?: string; instructions?: string; onModel?: (m: string) => void }) {
+          calls.push({ model: options.model, instructions: options.instructions });
+          options.onModel?.("anthropic/claude-haiku-4-5");
+          return "ok";
+        },
+      },
+      onAgentModel: ({ model }) => models.push(model),
+    },
+  );
+
+  assert.deepEqual(calls, [{ model: "haiku", instructions: undefined }]);
+  assert.deepEqual(models, ["anthropic/claude-haiku-4-5"]);
+});
+
 test("runWorkflow rejects non-string runtime phase titles", async () => {
   await assert.rejects(
     () =>

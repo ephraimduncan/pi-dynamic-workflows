@@ -67,6 +67,7 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
       "For workflow, failed agent(), parallel(), or pipeline() branches return null and log the failure unless the workflow is aborted. Check for nulls before synthesizing conclusions.",
       "For workflow, include a final synthesis/assertion agent when combining multiple subagent results; return a compact JSON-serializable value with ok/verdict plus the important outputs.",
       "For workflow, if agent() needs machine-readable output, pass a plain JSON Schema via opts.schema; agent() will return the validated object. Use JSON Schema syntax, not TypeScript or TypeBox constructors.",
+      "For workflow, opts.model runs a subagent on a different model, for example { model: 'haiku' } for cheap scans or { model: 'provider/id:high' } with a thinking level. Omit it to use the session model.",
       "For workflow, do not assume the parent assistant has repository code context inside subagents; include enough task context and relevant paths in each agent prompt.",
     ],
     parameters: workflowToolSchema,
@@ -83,6 +84,9 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
         snapshot = recomputeWorkflowSnapshot(snapshot);
         display.update(snapshot);
       };
+
+      const findRunningAgent = (label: string) =>
+        [...snapshot.agents].reverse().find((item) => item.label === label && item.status === "running");
 
       const recordPhase = (title: string | undefined) => {
         if (!title) return;
@@ -121,10 +125,13 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
             });
             update();
           },
+          onAgentModel(event) {
+            const agent = findRunningAgent(event.label);
+            if (agent) agent.model = event.model;
+            update();
+          },
           onAgentEnd(event) {
-            const agent = [...snapshot.agents]
-              .reverse()
-              .find((item) => item.label === event.label && item.status === "running");
+            const agent = findRunningAgent(event.label);
             if (agent) {
               agent.status = event.result === null ? "error" : "done";
               agent.resultPreview = preview(event.result);

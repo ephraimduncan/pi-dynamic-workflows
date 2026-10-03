@@ -130,6 +130,19 @@ const finding = await agent('Find security-sensitive files.', {
 
 Under the hood this is a Pi `structured_output` tool with `terminate: true`, so the subagent ends on that call without an extra assistant turn.
 
+### Per-agent model selection
+
+Use `opts.model` to run a subagent on a different model. The pattern resolves like the pi `--models` flag. It accepts a fuzzy name, a `provider/id`, or a glob. A `:level` suffix sets the thinking level:
+
+```js
+await agent('Scan the repo.', { label: 'scan', model: 'haiku' })
+await agent('Synthesize the findings.', { label: 'synthesis', model: 'anthropic/claude-opus-4-5:high' })
+```
+
+Only models with configured auth match. If the pattern matches no model or more than one model, the agent resolves to `null` and logs the error. If you do not set `model`, the subagent uses the session model. The live progress view shows the model of each subagent.
+
+Subagents cannot call the `workflow` tool. Thus, a workflow cannot start a nested workflow.
+
 ## How it works
 
 ```text

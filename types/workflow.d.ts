@@ -31,7 +31,10 @@ declare global {
     phase?: string;
     /** JSON Schema for structured output. When present, the returned value is typed as unknown unless you provide a generic. */
     schema?: TSchema;
-    /** Requested model name. Currently passed as subagent guidance. */
+    /**
+     * Model for this subagent, resolved like the pi `--models` flag: 'haiku', 'sonnet:low',
+     * or 'anthropic/claude-opus-4-5'. Only models with configured auth match. Default: the session model.
+     */
     model?: string;
     /** Requested isolation mode. */
     isolation?: "worktree";
