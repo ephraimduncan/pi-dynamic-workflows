@@ -421,12 +421,17 @@ function validateMeta(meta: unknown): asserts meta is WorkflowMeta {
     throw new Error("meta.whenToUse must be a string");
   if (value.phases !== undefined) {
     if (!Array.isArray(value.phases)) throw new Error("meta.phases must be an array");
-    for (const phase of value.phases) {
-      if (!phase || typeof phase !== "object" || typeof (phase as WorkflowMetaPhase).title !== "string") {
-        throw new Error("each meta phase must have a title string");
-      }
-    }
+    value.phases = value.phases.map(toMetaPhase);
   }
+}
+
+// Models often write `phases: ['Scan', 'Review']`. A bare string carries the same data as `{ title }`.
+function toMetaPhase(phase: unknown): WorkflowMetaPhase {
+  if (typeof phase === "string") return { title: phase };
+  if (phase && typeof phase === "object" && typeof (phase as WorkflowMetaPhase).title === "string") {
+    return phase as WorkflowMetaPhase;
+  }
+  throw new Error(`each meta.phases entry must be a string or { title: string }; got ${JSON.stringify(phase)}`);
 }
 
 function createLimiter(limit: number) {

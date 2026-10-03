@@ -85,6 +85,21 @@ test("parseWorkflowScript rejects array hazards", () => {
   );
 });
 
+test("parseWorkflowScript accepts string phase entries as titles", () => {
+  const parsed = parseWorkflowScript(
+    "export const meta = { name: 'demo', description: 'desc', phases: ['Scan', { title: 'Review', detail: 'd' }] }",
+  );
+
+  assert.deepEqual(parsed.meta.phases, [{ title: "Scan" }, { title: "Review", detail: "d" }]);
+});
+
+test("parseWorkflowScript names the bad phase entry and the expected shape", () => {
+  assert.throws(
+    () => parseWorkflowScript("export const meta = { name: 'demo', description: 'desc', phases: [{ name: 'Scan' }] }"),
+    /meta\.phases.*\{ title: string \}.*\{"name":"Scan"\}/,
+  );
+});
+
 test("parseWorkflowScript rejects template interpolation", () => {
   assert.throws(
     () => parseWorkflowScript("export const meta = { name: `demo_$" + "{id}`, description: 'desc' }"),
