@@ -93,6 +93,15 @@ declare global {
   /** Current working directory for the workflow/subagents. */
   const cwd: string;
 
+  /**
+   * Session tools, as in pi's codemode tool: `await tools.bash({ command: 'ls' })`. Tools with an
+   * output schema resolve to structured values. Other tools resolve to their text output.
+   */
+  const tools: Record<string, (args: Record<string, unknown>) => Promise<any>>;
+
+  /** Every tool in `tools`, with its description and TypeScript declaration. */
+  const ALL_TOOLS: ReadonlyArray<{ name: string; description: string }>;
+
   /** Deterministic process shim exposing only cwd(). */
   const process: { cwd(): string };
 

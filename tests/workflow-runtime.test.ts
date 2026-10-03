@@ -79,7 +79,7 @@ return { scan }
           },
         },
       ),
-    /workflow result must be structured-cloneable; did you forget to await agent\(\), parallel\(\), or pipeline\(\)\?.*Promise.*cloned/,
+    /did you forget to await agent\(\), parallel\(\), or pipeline\(\)\? result\.scan is a Promise/,
   );
 
   assert.equal(ended, 1);
@@ -130,7 +130,7 @@ return await parallel(['a', 'b', 'c'].map((name) => () => agent(name, { label: n
   );
 
   assert.deepEqual(prompts, ["a", "b"]);
-  assert.deepEqual(structuredClone(result.result), ["a", "b", null]);
+  assert.deepEqual(result.result, ["a", "b", null]);
   assert.ok(result.logs.some((line) => line.includes("token budget exhausted")));
 });
 
@@ -144,6 +144,23 @@ for (let i = 0; i < 3; i++) await agent('scan ' + i)
         { agent: fakeAgent, maxAgents: 2 },
       ),
     /agent limit reached: at most 2 agents/,
+  );
+});
+
+test("runWorkflow reports script errors with the line of the script", async () => {
+  await assert.rejects(
+    () =>
+      runWorkflow(
+        `export const meta = {
+  name: 'bad_line',
+  description: 'Fail on line 6'
+}
+const value = null
+value.missing
+`,
+        { agent: fakeAgent },
+      ),
+    /cannot read property 'missing' of null\n\s+at .*:6:/,
   );
 });
 
@@ -230,25 +247,37 @@ return { parsed: Date.parse('2020-01-01T00:00:00Z'), utc: Date.UTC(2020, 0, 1) }
     { agent: fakeAgent },
   );
 
-  assert.deepEqual(structuredClone(result.result), { parsed: 1577836800000, utc: 1577836800000 });
+  assert.deepEqual(result.result, { parsed: 1577836800000, utc: 1577836800000 });
 });
 
-test("runWorkflow drains pending agents when the script throws", async () => {
+// Resolves when the signal aborts, then rejects like WorkflowAgent does.
+function untilAborted(signal: AbortSignal): Promise<never> {
+  return new Promise((_resolve, reject) => {
+    const abort = () => reject(new Error("Subagent was aborted"));
+    if (signal.aborted) abort();
+    else signal.addEventListener("abort", abort, { once: true });
+  });
+}
+
+// A regression leaves the agent running, thus the timeout turns a hang into a failure.
+test("runWorkflow aborts the agents that a throwing script did not await", { timeout: 5000 }, async () => {
+  const signals: AbortSignal[] = [];
   let ended = 0;
 
   await assert.rejects(
     () =>
       runWorkflow(
-        `export const meta = {
-  name: 'throwing_script',
-  description: 'Start an agent then throw'
-}
-
+        `export const meta = { name: 'throwing_script', description: 'Start an agent then throw' }
 agent('scan', { label: 'scan' })
 throw new Error('boom')
 `,
         {
-          agent: fakeAgent,
+          agent: {
+            run(_prompt: string, options: { signal: AbortSignal }) {
+              signals.push(options.signal);
+              return untilAborted(options.signal);
+            },
+          },
           onAgentEnd() {
             ended++;
           },
@@ -257,7 +286,64 @@ throw new Error('boom')
     /boom/,
   );
 
+  assert.equal(signals.length, 1);
+  assert.equal(signals[0].aborted, true);
   assert.equal(ended, 1);
+});
+
+// A regression leaves the agent running, thus the timeout turns a hang into a failure.
+test("runWorkflow stops the script and its agents when the caller aborts", { timeout: 5000 }, async () => {
+  const controller = new AbortController();
+  const signals: AbortSignal[] = [];
+
+  await assert.rejects(
+    () =>
+      runWorkflow(
+        `export const meta = { name: 'abort', description: 'Abort a running agent' }
+await agent('scan', { label: 'scan' })
+`,
+        {
+          signal: controller.signal,
+          agent: {
+            run(_prompt: string, options: { signal: AbortSignal }) {
+              signals.push(options.signal);
+              controller.abort();
+              return untilAborted(options.signal);
+            },
+          },
+        },
+      ),
+    /workflow aborted/,
+  );
+
+  assert.equal(signals[0].aborted, true);
+});
+
+test("runWorkflow lets the script call scriptTools as tools.<name>()", async () => {
+  const calls: unknown[] = [];
+
+  const result = await runWorkflow(
+    `export const meta = { name: 'tools', description: 'Call a tool' }
+const files = await tools.list_files({ dir: 'src' })
+await agent('summarize ' + files.join(','), { label: 'summary' })
+return files
+`,
+    {
+      agent: fakeAgent,
+      scriptTools: [
+        {
+          name: "list_files",
+          execute(args) {
+            calls.push(args);
+            return ["a.ts", "b.ts"];
+          },
+        },
+      ],
+    },
+  );
+
+  assert.deepEqual(calls, [{ dir: "src" }]);
+  assert.deepEqual(result.result, ["a.ts", "b.ts"]);
 });
 
 test("runWorkflow parallel preserves input order and maps failures to null", async () => {
@@ -314,9 +400,7 @@ return { results, seen }
     },
   );
 
-  // result.result was built inside the vm realm; structuredClone reifies it
-  // into host-realm objects so deepStrictEqual prototype checks pass.
-  assert.deepEqual(structuredClone(result.result), {
+  assert.deepEqual(result.result, {
     results: ["result:a1|a|0", null, "result:c1|c|2"],
     seen: [
       ["a", "a", 0],

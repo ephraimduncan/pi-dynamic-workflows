@@ -1,4 +1,5 @@
-import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { type CodemodeJsonSchema, type CodemodeTool, renderToolSample } from "@earendil-works/pi-codemode";
+import { defineTool, type ExtensionToolContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import {
@@ -16,7 +17,7 @@ const workflowToolSchema = Type.Object({
     description: [
       "Required raw JavaScript workflow script, with no Markdown fences.",
       "First statement: export const meta = { name: 'short_snake_case', description: 'non-empty description' }. meta.phases is optional documentation; live progress is driven by phase(title).",
-      "Use phase('Name'), agent(prompt, opts), parallel(arrayOfFunctions), pipeline(items, ...stages), log(message), args, and budget. The workflow must call agent() at least once.",
+      "Use phase('Name'), agent(prompt, opts), parallel(arrayOfFunctions), pipeline(items, ...stages), log(message), args, budget, and tools.<name>(args) for the session tools. The workflow must call agent() at least once.",
       "parallel() requires functions, not promises: await parallel(items.map(item => () => agent(...))).",
     ].join(" "),
   }),
@@ -57,7 +58,7 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
     name: "workflow",
     label: "Workflow",
     description: [
-      "Execute a deterministic JavaScript workflow that orchestrates multiple subagents with agent(), parallel(), and pipeline().",
+      "Execute a deterministic JavaScript workflow that orchestrates multiple subagents with agent(), parallel(), and pipeline(). The script runs in pi's codemode sandbox, thus it can also call the session tools as tools.<name>(args).",
       "script is required raw JavaScript. It must start with export const meta = { name, description } and must call agent() at least once; phases are optional metadata.",
     ].join(" "),
     promptSnippet:
@@ -67,12 +68,14 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
       "For workflow, always pass one raw JavaScript string in the required script parameter; do not include Markdown fences or prose around the script.",
       "For workflow, the script's first statement must be `export const meta = { name: 'short_snake_case', description: 'non-empty human description' }`; meta.name and meta.description are required non-empty strings, and meta.phases is optional metadata for a stable upfront outline.",
       "For workflow, write plain JavaScript after the meta export. Do not use TypeScript syntax, imports, require(), fs, Date.now(), Math.random(), or new Date().",
-      "For workflow, available globals are agent(prompt, opts), parallel(thunks), pipeline(items, ...stages), phase(title), log(message), args, cwd, process.cwd(), and budget. Every workflow must call agent() at least once; do not use workflow only to declare phases or return a static object.",
+      "For workflow, available globals are agent(prompt, opts), parallel(thunks), pipeline(items, ...stages), phase(title), log(message), args, cwd, process.cwd(), budget, tools, and ALL_TOOLS. Every workflow must call agent() at least once; do not use workflow only to declare phases or return a static object.",
+      "For workflow, tools.<name>(args) calls a session tool the same way as in codemode: `await tools.read({ path })`, `await tools.bash({ command })`. Use tools for deterministic steps such as listing files or running a command, and use agent() for work that needs a model. ALL_TOOLS lists each tool with its declaration.",
       "For workflow, call phase(title) when a new group of work starts. Phase names may be conditional or built in a loop; do not predeclare speculative phases just in case.",
       "For workflow, prefer it for decomposable work: repository inspection, independent research/checks, multi-perspective review, or fan-out/fan-in synthesis. Do not use it for a single quick file read/edit or when ordinary tools are enough.",
       "For workflow, parallel() takes functions, not promises: use `await parallel(items.map(item => () => agent('...', { label: '...' })))`, never `await parallel(items.map(item => agent(...)))`. Results are returned in input order.",
       "For workflow, pipeline(items, ...stages) runs each item through stages sequentially, while different items may run concurrently. Each stage receives (previousValue, originalItem, index).",
       "For workflow, every agent() call should include a unique short label option, 2-5 words, such as { label: 'repo inventory' } or { label: 'source modules' }; unique labels make live status and error reporting readable.",
+      "For workflow, await every agent() call. When the script ends, agents that it did not await are aborted.",
       "For workflow, failed agent(), parallel(), or pipeline() branches return null and log the failure unless the workflow is aborted. Check for nulls before synthesizing conclusions.",
       "For workflow, include a final synthesis/assertion agent when combining multiple subagent results; return a compact JSON-serializable value with ok/verdict plus the important outputs.",
       "For workflow, if agent() needs machine-readable output, pass a plain JSON Schema via opts.schema; agent() will return the validated object. Use JSON Schema syntax, not TypeScript or TypeBox constructors.",
@@ -111,6 +114,7 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
           concurrency: options.concurrency,
           maxAgents: options.maxAgents,
           tokenBudget: params.tokenBudget,
+          scriptTools: createScriptTools(ctx),
           session: {
             model: ctx.model,
             thinkingLevel: ctx.thinkingLevel,
@@ -205,6 +209,34 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
       return new Text(text?.type === "text" ? text.text : theme.fg("muted", "workflow"), 0, 0);
     },
   });
+}
+
+/**
+ * The session tools as codemode tools, like pi's codemode tool exposes them. Calls go through
+ * ctx.executeTool(), thus they get the same hooks and permission checks as model calls.
+ */
+function createScriptTools(ctx: ExtensionToolContext): CodemodeTool[] {
+  return ctx.tools
+    .filter((tool) => tool.name !== "workflow" && tool.name !== "codemode")
+    .map((tool) => ({
+      name: tool.name,
+      description: renderToolSample({
+        name: tool.name,
+        description: tool.description,
+        inputSchema: tool.parameters as CodemodeJsonSchema,
+        outputSchema: (tool.outputSchema as CodemodeJsonSchema | undefined) ?? { type: "string" },
+      }),
+      async execute(args, { signal }) {
+        const { result, isError } = await ctx.executeTool(tool.name, args, { signal });
+        // Tools with an output schema resolve to structured content, other tools to their text.
+        if (tool.outputSchema && result.structuredContent !== undefined) return result.structuredContent;
+        const text = result.content
+          .flatMap((block: { type: string; text?: string }) => (block.type === "text" ? [block.text] : []))
+          .join("\n");
+        if (isError) throw new Error(text || `Tool "${tool.name}" failed`);
+        return text;
+      },
+    }));
 }
 
 function normalizeWorkflowToolArgs(args: unknown): WorkflowToolInput {

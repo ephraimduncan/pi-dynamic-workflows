@@ -1,9 +1,10 @@
-import vm from "node:vm";
+import { type CodemodeResult, CodemodeSandbox, type CodemodeTool } from "@earendil-works/pi-codemode";
 import type { SessionStats } from "@earendil-works/pi-coding-agent";
 import type { Node } from "acorn";
 import { parse } from "acorn";
 import type { TSchema } from "typebox";
 import { WorkflowAgent, type WorkflowAgentOptions } from "./agent.js";
+import { buildSandboxScript, NONDETERMINISM_ERROR } from "./sandbox-script.js";
 
 export interface WorkflowMetaPhase {
   title: string;
@@ -21,6 +22,8 @@ export interface WorkflowMeta {
 export interface WorkflowRunOptions extends WorkflowAgentOptions {
   args?: unknown;
   agent?: Pick<WorkflowAgent, "run">;
+  /** Tools the script calls as `tools.<name>(args)`, as in pi's codemode tool. */
+  scriptTools?: CodemodeTool[];
   concurrency?: number;
   /** Token ceiling for all subagent sessions. When spent, agent() calls fail. */
   tokenBudget?: number | null;
@@ -53,7 +56,6 @@ export interface AgentOptions<TSchemaDef extends TSchema | undefined = TSchema |
 }
 
 interface RuntimeState {
-  currentPhase?: string;
   logs: string[];
   phases: string[];
   agentCount: number;
@@ -64,43 +66,13 @@ type AnyNode = Node & { [key: string]: any; start: number; end: number };
 
 const DEFAULT_MAX_AGENTS = 200;
 
-const NONDETERMINISM_ERROR =
-  "Workflow scripts must be deterministic: Date.now()/Math.random()/new Date() are unavailable";
-
-const throwNondeterministic = (): never => {
-  throw new Error(NONDETERMINISM_ERROR);
-};
+/** Same heap limit as pi's codemode tool. The VM shares pi's process. */
+const SANDBOX_MEMORY_LIMIT_BYTES = 256 * 1024 * 1024;
 
 /**
- * Math with random() replaced by a throwing stub. Other methods are inherited
- * from the host Math object. The AST check rejects literal `Math.random()`
- * calls, but an alias (`const f = Math.random; f()`) slips past it; this shim
- * closes that hole at runtime.
+ * Run a workflow script in pi's codemode sandbox. The script calls `agent()`, `parallel()`,
+ * `pipeline()`, `phase()`, `log()`, and `tools.<name>()` for each tool in `scriptTools`.
  */
-function createDeterministicMath(): Math {
-  const shim = Object.create(Math) as Math;
-  Object.defineProperty(shim, "random", {
-    value: throwNondeterministic,
-    enumerable: false,
-    writable: false,
-    configurable: false,
-  });
-  return Object.freeze(shim);
-}
-
-/**
- * Deterministic Date subset: parse() and UTC() work, now() throws, and the
- * shim is a plain object so `new Date()` is a TypeError even if the AST check
- * is bypassed by aliasing.
- */
-function createDeterministicDate(): Pick<DateConstructor, "parse" | "UTC" | "now"> {
-  return Object.freeze({
-    parse: Date.parse.bind(Date),
-    UTC: Date.UTC.bind(Date),
-    now: throwNondeterministic,
-  });
-}
-
 export async function runWorkflow<T = unknown>(
   script: string,
   options: WorkflowRunOptions = {},
@@ -116,43 +88,32 @@ export async function runWorkflow<T = unknown>(
   const limiter = createLimiter(concurrency);
   const pendingAgentRuns = new Set<Promise<unknown>>();
   const maxAgents = options.maxAgents ?? DEFAULT_MAX_AGENTS;
+  const tokenBudget = options.tokenBudget ?? null;
   let requestedAgents = 0;
 
   const log = (message: string) => {
-    const text = String(message);
-    state.logs.push(text);
-    options.onLog?.(text);
+    state.logs.push(message);
+    options.onLog?.(message);
   };
 
-  const phase = (title: unknown) => {
-    const text = requireString(title, "phase title");
-    state.currentPhase = text;
-    if (!state.phases.includes(text)) state.phases.push(text);
-    options.onPhase?.(text);
-  };
-
-  const budget = Object.freeze({
-    total: options.tokenBudget ?? null,
-    spent: () => state.spent,
-    remaining: () => (options.tokenBudget == null ? Infinity : Math.max(0, options.tokenBudget - state.spent)),
-  });
-
-  const throwIfAborted = () => {
-    if (options.signal?.aborted) throw new Error("workflow aborted");
+  const phase = (title: string) => {
+    if (!state.phases.includes(title)) state.phases.push(title);
+    options.onPhase?.(title);
   };
 
   const throwIfBudgetSpent = () => {
-    if (budget.total !== null && budget.remaining() <= 0) throw new Error("workflow token budget exhausted");
+    if (tokenBudget !== null && state.spent >= tokenBudget) throw new Error("workflow token budget exhausted");
   };
 
-  const agent = async (prompt: unknown, agentOptions: unknown = {}) => {
-    throwIfAborted();
+  const agent = async (prompt: unknown, agentOptions: unknown, scriptSignal: AbortSignal) => {
     throwIfBudgetSpent();
     if (++requestedAgents > maxAgents) throw new Error(`workflow agent limit reached: at most ${maxAgents} agents`);
     const taskPrompt = requireString(prompt, "agent prompt");
     const normalizedOptions = normalizeAgentOptions(agentOptions);
-    const assignedPhase = normalizedOptions.phase ?? state.currentPhase;
+    const assignedPhase = normalizedOptions.phase;
     const requestedLabel = normalizedOptions.label?.trim();
+    // The sandbox aborts scriptSignal when the script ends before it awaits this agent.
+    const signal = options.signal ? AbortSignal.any([options.signal, scriptSignal]) : scriptSignal;
     const run = limiter(async () => {
       // The budget can run out while this agent waits in the queue.
       throwIfBudgetSpent();
@@ -160,11 +121,11 @@ export async function runWorkflow<T = unknown>(
       const label = requestedLabel || defaultAgentLabel(assignedPhase, state.agentCount);
       options.onAgentStart?.({ label, phase: assignedPhase, prompt: taskPrompt });
       try {
-        throwIfAborted();
+        if (signal.aborted) throw new Error("Subagent was aborted");
         const result = await agentRunner.run(taskPrompt, {
           label,
           schema: normalizedOptions.schema,
-          signal: options.signal,
+          signal,
           model: normalizedOptions.model,
           onModel: (model: string) => options.onAgentModel?.({ label, phase: assignedPhase, model }),
           onStats: (stats: SessionStats) => {
@@ -172,12 +133,16 @@ export async function runWorkflow<T = unknown>(
           },
           instructions: buildAgentInstructions(assignedPhase, normalizedOptions),
         } as any);
-        throwIfAborted();
+        if (signal.aborted) throw new Error("Subagent was aborted");
         options.onAgentEnd?.({ label, phase: assignedPhase, result });
         return result;
       } catch (error) {
         if (options.signal?.aborted) throw error;
-        log(`agent ${label} failed: ${error instanceof Error ? error.message : String(error)}`);
+        log(
+          scriptSignal.aborted
+            ? `agent ${label} cancelled: the script ended before it awaited the agent`
+            : `agent ${label} failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
         options.onAgentEnd?.({ label, phase: assignedPhase, result: null });
         return null;
       }
@@ -187,98 +152,43 @@ export async function runWorkflow<T = unknown>(
       () => pendingAgentRuns.delete(run),
       () => pendingAgentRuns.delete(run),
     );
-    return run;
+    return { value: await run, spent: state.spent };
   };
 
-  const parallel = async (thunks: Array<() => Promise<unknown>>) => {
-    throwIfAborted();
-    if (!Array.isArray(thunks)) throw new TypeError("parallel() expects an array of functions");
-    if (thunks.some((thunk) => typeof thunk !== "function")) {
-      throw new TypeError("parallel() expects an array of functions, not promises. Wrap each call: () => agent(...)");
-    }
-    return Promise.all(
-      thunks.map(async (thunk, index) => {
-        try {
-          return await thunk();
-        } catch (error) {
-          if (options.signal?.aborted) throw error;
-          log(`parallel[${index}] failed: ${error instanceof Error ? error.message : String(error)}`);
-          return null;
-        }
-      }),
-    );
-  };
-
-  const pipeline = async (
-    items: unknown[],
-    ...stages: Array<(prev: unknown, original: unknown, index: number) => unknown>
-  ) => {
-    throwIfAborted();
-    if (!Array.isArray(items)) throw new TypeError("pipeline() expects an array as the first argument");
-    if (stages.some((stage) => typeof stage !== "function")) {
-      throw new TypeError("pipeline() stages must be functions: pipeline(items, item => ..., result => ...)");
-    }
-    return Promise.all(
-      items.map(async (item, index) => {
-        let value: unknown = item;
-        for (const stage of stages) {
-          try {
-            throwIfAborted();
-            value = await stage(value, item, index);
-            throwIfAborted();
-          } catch (error) {
-            if (options.signal?.aborted) throw error;
-            log(`pipeline[${index}] failed: ${error instanceof Error ? error.message : String(error)}`);
-            return null;
-          }
-        }
-        return value;
-      }),
-    );
-  };
-
-  const context = vm.createContext({
-    agent,
-    parallel,
-    pipeline,
-    log,
-    phase,
-    args: options.args,
-    cwd: options.cwd ?? process.cwd(),
-    process: Object.freeze({ cwd: () => options.cwd ?? process.cwd() }),
-    budget,
-    console: {
-      log,
-      info: log,
-      warn: (m: unknown) => log(`[warn] ${String(m)}`),
-      error: (m: unknown) => log(`[error] ${String(m)}`),
-    },
-    JSON,
-    Math: createDeterministicMath(),
-    Date: createDeterministicDate(),
-    Array,
-    Object,
-    String,
-    Number,
-    Boolean,
-    Set,
-    Map,
-    Promise,
+  const sandbox = new CodemodeSandbox({
+    tools: options.scriptTools,
+    globals: [
+      {
+        name: "__workflow.agent",
+        spread: true,
+        execute: ([prompt, opts]: any, { signal }) => agent(prompt, opts, signal),
+      },
+      { name: "__workflow.phase", execute: (title) => phase(String(title)) },
+      { name: "__workflow.log", execute: (message) => log(String(message)) },
+    ],
+    // Workflows run for as long as their agents run. The caller's signal stops them.
+    timeoutMs: Number.POSITIVE_INFINITY,
+    memoryLimitBytes: SANDBOX_MEMORY_LIMIT_BYTES,
   });
-
-  const wrapped = `(async () => {\n${body}\n})()`;
-  let result: unknown;
+  const code = buildSandboxScript(body, { args: options.args, cwd: options.cwd ?? process.cwd(), tokenBudget });
+  let outcome: CodemodeResult;
   try {
-    result = await new vm.Script(wrapped, { filename: `${meta.name || "workflow"}.js` }).runInContext(context);
+    outcome = await sandbox.execute(code, { signal: options.signal });
   } finally {
-    // A script that throws after firing un-awaited agent() calls must not
-    // leave real subagent sessions running detached; always drain them.
+    await sandbox.close();
+    // The sandbox aborts the agents that the script did not await. Wait until their sessions stop.
     await Promise.allSettled([...pendingAgentRuns]);
   }
-  assertStructuredCloneable(result, "workflow result");
+  if (!outcome.ok) {
+    const { kind, message, stack } = outcome.error;
+    if (kind === "aborted") throw new Error("workflow aborted");
+    // Keep the stack frames: they give the script line to the model that wrote it.
+    const frames = kind === "script" ? stack?.split("\n").slice(1).join("\n") : undefined;
+    throw new Error(frames ? `${message}\n${frames}` : message);
+  }
   return {
     meta,
-    result: result as T,
+    result: outcome.value as T,
     logs: state.logs,
     phases: state.phases,
     agentCount: state.agentCount,
@@ -321,8 +231,16 @@ export function parseWorkflowScript(script: string): { meta: WorkflowMeta; body:
 
   return {
     meta,
-    body: script.slice(0, first.start) + script.slice(first.end),
+    // Blank lines keep the line numbers of the script in stack traces.
+    body:
+      script.slice(0, first.start) +
+      "\n".repeat(lineCount(script.slice(first.start, first.end)) - 1) +
+      script.slice(first.end),
   };
+}
+
+function lineCount(text: string): number {
+  return text.split("\n").length;
 }
 
 function evaluateLiteral(node: AnyNode, path: string): unknown {
@@ -490,17 +408,6 @@ function normalizeAgentOptions(value: unknown): AgentOptions {
     isolation: options.isolation,
     agentType: optionalString(options.agentType, "agent type"),
   };
-}
-
-function assertStructuredCloneable(value: unknown, name: string): void {
-  try {
-    structuredClone(value);
-  } catch (error) {
-    const detail = error instanceof Error ? ` ${error.message}` : "";
-    throw new Error(
-      `${name} must be structured-cloneable; did you forget to await agent(), parallel(), or pipeline()?${detail}`,
-    );
-  }
 }
 
 function defaultAgentLabel(phase: string | undefined, index: number): string {

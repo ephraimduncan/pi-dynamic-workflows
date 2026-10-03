@@ -83,7 +83,7 @@ Reusable workflow files can opt into editor hints for workflow globals:
 /// <reference types="pi-dynamic-workflows/workflow" />
 ```
 
-This declares `agent`, `parallel`, `pipeline`, `phase`, `log`, `args`, `cwd`, and `budget` for TypeScript-aware editors.
+This declares `agent`, `parallel`, `pipeline`, `phase`, `log`, `args`, `cwd`, `budget`, `tools`, and `ALL_TOOLS` for TypeScript-aware editors.
 
 ### Available globals
 
@@ -96,21 +96,24 @@ This declares `agent`, `parallel`, `pipeline`, `phase`, `log`, `args`, `cwd`, an
 | `log(message)` | Append a workflow-level log line. |
 | `args` | Optional JSON value passed in via the tool's `args` parameter. |
 | `cwd`, `process.cwd()` | Current working directory for subagents. |
+| `tools.<name>(args)` | Call a session tool, as in pi's [codemode](https://pi.dev/docs/latest/codemode) tool: `await tools.bash({ command: 'ls' })`. The call goes through the same hooks and permission checks as a call from the model. `ALL_TOOLS` lists each tool with its declaration. |
 | `budget` | `{ total, spent(), remaining() }` token budget tracker. `spent()` counts the tokens that finished subagent sessions used. `total` comes from the `tokenBudget` tool argument. When the budget is spent, new `agent()` calls fail. |
 | `Date` | Deterministic subset only: `Date.parse()` and `Date.UTC()`. |
 
 ### Determinism rules
 
-Workflow scripts are evaluated inside a Node `vm` sandbox. The following are intentionally unavailable:
+Workflow scripts run in the sandbox of pi's codemode tool (`@earendil-works/pi-codemode`): a QuickJS VM in a worker thread. The script can reach the outside world only through `agent()`, `tools`, and the other workflow globals. The following are intentionally unavailable:
 
 - `Date.now()`, `new Date()` — the sandbox `Date` exposes only the deterministic statics `Date.parse()` and `Date.UTC()`; `now()` throws and the shim is not a constructor
 - `Math.random()` — the sandbox `Math` inherits every other method but `random()` throws, even when aliased (`const f = Math.random; f()`)
-- `require`, `import`, `fs`, network APIs
+- `require`, `import`, `fs`, `fetch`, timers
 - spreads, computed keys, template interpolation, function calls inside `meta`
 
 The parser rejects the direct forms up front; the runtime shims close aliasing bypasses. This keeps `meta` parseable, runs reproducible, and the surface area small.
 
 ### Limits
+
+If the script ends before it awaits an `agent()` call, the runtime aborts that agent, as codemode cancels the tool calls of a finished script.
 
 A workflow run can make at most 200 `agent()` calls. This limit stops a script that loops without end. To change it, use the `maxAgents` option of `createWorkflowTool()`.
 
@@ -154,8 +157,8 @@ Subagents cannot call the `workflow` tool. Thus, a workflow cannot start a neste
 ```text
 user prompt
   → Pi model writes a workflow script
-  → workflow tool parses + runs script in a vm sandbox
-  → script calls agent(), parallel(), pipeline()
+  → workflow tool parses the script + runs it in the codemode sandbox
+  → script calls agent(), parallel(), pipeline(), and tools.<name>()
   → each agent() spawns an in-memory Pi subagent session
   → snapshots stream back as compact progress
   → final structured result returned to the parent assistant
@@ -167,7 +170,8 @@ Subagents run in fresh in-memory Pi sessions with the standard coding tools, so 
 
 | File | Purpose |
 | --- | --- |
-| `src/workflow.ts` | AST-validated parser and sandboxed workflow runtime. |
+| `src/workflow.ts` | AST-validated parser and workflow runtime on the codemode sandbox. |
+| `src/sandbox-script.ts` | The code that runs in the sandbox around the workflow body: `parallel()`, `pipeline()`, `phase()`, `budget`, and the determinism stubs. |
 | `src/workflow-tool.ts` | The Pi `workflow` tool, prompt guidelines, rendering, abort handling. |
 | `src/agent.ts` | `WorkflowAgent`, an in-memory Pi subagent runner. |
 | `src/structured-output.ts` | Terminating structured-output tool backed by TypeBox/JSON Schema. |
