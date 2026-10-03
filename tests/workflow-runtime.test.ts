@@ -136,6 +136,19 @@ test("runWorkflow blocks aliased Math.random at runtime", async () => {
   }
 });
 
+test("runWorkflow blocks aliased Date at runtime", async () => {
+  for (const expression of ["const D = Date; D.now()", "const D = Date; new D()"]) {
+    await assert.rejects(
+      () =>
+        runWorkflow(`export const meta = { name: 'date_alias', description: 'Alias Date' }\n${expression}`, {
+          agent: fakeAgent,
+        }),
+      /must be deterministic|not a constructor/,
+      expression,
+    );
+  }
+});
+
 test("runWorkflow keeps deterministic Math methods working", async () => {
   const result = await runWorkflow(
     `export const meta = { name: 'math_ok', description: 'Use deterministic Math' }
