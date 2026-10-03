@@ -43,7 +43,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Michaelliv/pi-dynamic-workflows.git"
+    "url": "git+https://github.com/ephraimduncan/pi-dynamic-workflows.git"
   },
   "author": "michaelliv",
   "license": "MIT",
@@ -51,16 +51,16 @@
     "acorn": "^8.16.0"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": "^0.78.0",
-    "@earendil-works/pi-coding-agent": "^0.78.0",
-    "@earendil-works/pi-tui": "^0.78.0",
+    "@earendil-works/pi-ai": ">=1.0.0",
+    "@earendil-works/pi-coding-agent": ">=1.0.0",
+    "@earendil-works/pi-tui": ">=1.0.0",
     "typebox": "*"
   },
   "devDependencies": {
     "@biomejs/biome": "2.4.16",
-    "@earendil-works/pi-ai": "0.78.0",
-    "@earendil-works/pi-coding-agent": "0.78.0",
-    "@earendil-works/pi-tui": "0.78.0",
+    "@earendil-works/pi-ai": "1.0.1",
+    "@earendil-works/pi-coding-agent": "1.0.1",
+    "@earendil-works/pi-tui": "1.0.1",
     "tsx": "latest",
     "typebox": "latest",
     "typescript": "latest"

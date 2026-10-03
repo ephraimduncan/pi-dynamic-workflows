@@ -97,8 +97,8 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
           signal,
           concurrency: options.concurrency,
           session: {
-            modelRegistry: ctx.modelRegistry,
             model: ctx.model,
+            thinkingLevel: ctx.thinkingLevel,
           },
           onLog(message) {
             snapshot.logs.push(message);
